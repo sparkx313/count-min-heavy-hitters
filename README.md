@@ -104,6 +104,36 @@ Event-remove leaves 5 events of *other* keys in the victim's cells (correct: the
 really there) and under-estimates nobody. Subtract-estimate erases 9,017 from every row,
 so one innocent colliding key loses count that was never its own.
 
+The false-positive trap, in twenty lines — this is the guarantee working, not failing:
+
+```python
+from sketchlib import CountMinSketch, ip_key
+
+heavy = "10.0.0.1"
+cms = CountMinSketch(64, 2, seed=3)           # eps*N = 200000 / 64 = 3125 events
+cms.add(heavy, 100000)
+for i in range(100000):
+    cms.add(ip_key(10000 + i))                # 100,000 keys occurring exactly once
+probes = ["203.0.113.%d" % i for i in range(20000)]   # never inserted, at all
+print(cms.query(heavy), max(cms.query(p) for p in probes),
+      sum(1 for p in probes if cms.query(p) >= 1000))
+wide = CountMinSketch(1024, 5, seed=3)
+wide.add(heavy, 100000)
+for i in range(100000):
+    wide.add(ip_key(10000 + i))
+print(wide.query(heavy), max(wide.query(p) for p in probes),
+      sum(1 for p in probes if wide.query(p) >= 1000))
+```
+
+    101562 101562 20000
+    100092 109 0
+
+At width 64 every one of the 20,000 never-seen probes clears a 1,000-event threshold and the
+worst reports 101,562 - byte for byte the heavy hitter's own estimate, because it collided in
+both rows and inherited the whole count. Five rows at width 1024 leaves 0 offenders and a
+worst of 109, and the heavy hitter's own over-estimate falls from 1,562 events to 92: the
+top of the table was never the problem, the tail was.
+
 ## Measured results
 
 Quoted line-for-line from `benchmarks/last_run.txt`. Deterministic tables replay
