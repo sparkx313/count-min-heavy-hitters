@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "count-min-heavy-hitters"
+version = "0.1.0"
+description = "Count-Min Sketch, Space-Saver and an exact dict baseline, measured against each other"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "sparkx313" }]
+keywords = ["count-min-sketch", "heavy-hitters", "stream-processing", "sketch"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: System :: Logging",
+]
+dependencies = []
+
+[tool.setuptools]
+packages = ["sketchlib"]

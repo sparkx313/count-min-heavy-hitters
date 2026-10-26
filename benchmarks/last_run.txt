@@ -1,0 +1,235 @@
+count-min-heavy-hitters benchmarks - python 3.11.9
+Measures Count-Min Sketch (plain, mean/median/count-mean modes), Space-
+Saver and an exact dict on seeded Zipf streams: error, top-k, memory, cost.
+==============================================================================
+1. error vs the guarantee (deterministic)
+==============================================================================
+Run scale 1.0: N=200000 events per section, depth=5. Stream: 200000 events,
+2000 distinct keys, skew=1.1, seed=1; tracked population = every key the dict
+saw.
+
+width  eps*N   delta  mean_ov  p95  max_ov  gt_epsN  u_min  u_mean  u_cmean
+---------------------------------------------------------------------------
+  256  781.2  0.0312    122.2  251    1038        1      0       0     1999
+ 1024  195.3  0.0312      8.9   36     135        0      0       0     2000
+ 4096   48.8  0.0312      0.1    0      22        0      0       0     2000
+16384   12.2  0.0312      0.0    0       0        0      0       0     2000
+
+Interpretation: Width is the error knob and the run follows it: eps*N shrinks
+  64.0x (781.2 events at width 256 down to 12.2 at width 16384) and the
+  measured mean over-estimate goes 122.2 -> 0.0, i.e. it falls to 0.0. The
+  narrowest width sits 0.16x above its own eps*N on average, and 1 of the 2000
+  tracked keys exceed that budget there where delta=0.0312 licenses about 62.5
+  violations; at width 16384 the count is 0. Direction is where folklore is
+  wrong: min-, mean- and median-of-rows together under-estimated 0 keys out of
+  8000 key-width trials on this insert-only stream - every cell already holds
+  at least the true count when updates are non-negative, so the minimum does
+  too - while the noise-subtracting count-mean under-estimated 7999 of the
+  same 8000 trials (100.0%). Count-mean pays for its own correction: it
+  subtracts (row_total - est)/(w-1), about N/(w-1), from the *minimum* of 5
+  rows, and that minimum already sits below the average cell load, so the
+  subtraction is systematically too large on a loaded sketch.
+
+Same geometry (width 1024, depth 5) once deletions are allowed: the 100
+highest-count keys are deleted outright, so their true count becomes 0.
+
+op                 victims  u_min  u_mean  u_med  u_cmean  worst_gap
+--------------------------------------------------------------------
+event-remove       100          0       0      0     1983        -54
+subtract-estimate  100        150       1      0     1981       -126
+clamped-remove     100          0       0      0     1983        -54
+
+Interpretation: Deletions change the verdict on direction, not on geometry:
+  subtract-estimate under-estimates 150 of 2000 keys with a worst gap of -126
+  events, while event-remove under-estimates 0 keys (worst gap -54). So min-
+  of-rows breaks only when a negative update fails to undo its own insertion,
+  never merely because a deletion is possible. count-mean under-estimates 1983
+  keys after event-remove and 1981 after subtract-estimate, and the clamped
+  decrement lands at 0 under-estimates for min-of-rows: a cell stopped at zero
+  no longer returns to its pre-insertion value, so a later re-insertion of the
+  same key is over-counted - the consequence the clamped-delete unit test pins
+  down.
+==============================================================================
+2. top-k: cms+heap vs space-saver vs exact dict (deterministic)
+==============================================================================
+Hard regime: 200000 events over a 20000-key universe, both approximations get
+the same 64-slot candidate budget, cms width 1024, depth 5, seed 2. The exact
+dict is the ground truth and ties break by key name.
+
+ k  skew  method       overlap   prec  recall     mae  size
+-----------------------------------------------------------
+ 5  0.7   cms+heap         5/5  1.000   1.000    99.2     5
+ 5  0.7   space-saver      2/5  0.400   0.400  2190.6     5
+10  0.7   cms+heap       10/10  1.000   1.000   109.0    10
+10  0.7   space-saver     3/10  0.300   0.300  2340.4    10
+50  0.7   cms+heap       46/50  0.920   0.920   117.2    50
+50  0.7   space-saver     7/50  0.140   0.140  2917.7    50
+ 5  1.1   cms+heap         5/5  1.000   1.000    25.4     5
+ 5  1.1   space-saver      5/5  1.000   1.000     0.0     5
+10  1.1   cms+heap       10/10  1.000   1.000    30.3    10
+10  1.1   space-saver    10/10  1.000   1.000     1.8    10
+50  1.1   cms+heap       49/50  0.980   0.980    37.1    50
+50  1.1   space-saver    20/50  0.400   0.400  1519.7    50
+ 5  1.6   cms+heap         5/5  1.000   1.000     1.8     5
+ 5  1.6   space-saver      5/5  1.000   1.000     0.0     5
+10  1.6   cms+heap       10/10  1.000   1.000     1.3    10
+10  1.6   space-saver    10/10  1.000   1.000     0.0    10
+50  1.6   cms+heap       50/50  1.000   1.000     1.7    50
+50  1.6   space-saver    40/50  0.800   0.800   154.8    50
+
+Interpretation: Over the 9 (k, skew) settings space-saver averages recall
+  0.671 and cms+heap 0.989, so cms+heap is ahead by 0.318: cms+heap wins 5
+  settings, loses 0, ties 4. The single worst point is space-saver at k=50 /
+  skew=0.7 (recall 0.140) and the best is cms+heap at k=50 / skew=1.6 (1.000);
+  recall spans 0.140-1.000 overall. Mean absolute error of the returned counts
+  is 46.99 events for cms+heap versus 1013.89 for space-saver, and the
+  accuracy crown and the recall crown sit on the same structure. Smallest
+  reported set size is 5 against a requested k of up to 50, so precision
+  (0.140-1.000) differs from recall only where a structure returns fewer than
+  k keys.
+==============================================================================
+3. memory per structure vs the exact dict (deterministic)
+==============================================================================
+Stream: 200000 events over a 200000-key universe -> 39062 distinct keys seen
+by the dict (112.5 bytes/key). Error target: over-estimate <= eps*N with eps =
+1/4096 = 48.8 events.
+
+structure    geometry          tracked    bytes     KiB  err<=N/x  x_dict
+-------------------------------------------------------------------------
+exact dict   1 hash map          39062  4394588  4291.6         0   1.000
+cms          1024x5           all keys    41756    40.8     195.3   0.010
+cms          4096x5           all keys   164636   160.8      48.8   0.037
+cms          16384x5          all keys   656156   640.8      12.2   0.149
+cms+heap     4096x5+heap4096      4096   796658   778.0      48.8   0.181
+space-saver  cap=1024             1024   236232   230.7     195.3   0.054
+space-saver  cap=4096             4096   983597   960.5      48.8   0.224
+space-saver  cap=16384           16384  3971605  3878.5      12.2   0.904
+
+Interpretation: At the matched additive error target of 48.8 events the cms
+  costs 164636 bytes (160.8 KiB, 0.037 of the exact dict) and space-saver
+  costs 983597 bytes (960.5 KiB, 0.224 of the dict): the sketch is 6.0x
+  smaller than space-saver at the same target, and both are dwarfed by the
+  dict's 4394588 bytes. The dict's cost is a function of distinct keys, not
+  events - 112.5 bytes per key measured here - so within a 64 MiB budget it
+  can only hold 596507 keys, whereas the cms geometry for the same target
+  (width 4096 x depth 5) is fixed at 164636 bytes = 0.245% of that budget,
+  independent of how many keys the stream actually contains.
+
+Interpretation: Python overhead is real but bounded: 20480 cells of 8 bytes is
+  163840 bytes of payload; the measured cms footprint works out at 8.04 bytes
+  per cell, i.e. 1.00x the raw array once headers and container pointers are
+  counted. Quadrupling the width multiplies the footprint by 3.985, so the
+  accounting is linear as promised, and the cms+heap wrapper costs 796658
+  bytes total - 632022 bytes of it (or 79.3%) is the candidate table, not the
+  sketch.
+==============================================================================
+4. the false-positive trap: one event, thousands reported (deterministic)
+==============================================================================
+Stream: 10.0.0.1 appears 100000 times, then 100000 keys appear exactly once.
+Counting keys reported >= 1000 that truly occurred once, plus 20000 never-seen
+probe keys.
+
+width  d       rare>=1k  rare_max   unseen>=1k  unseen_max   h_est  h_true
+--------------------------------------------------------------------------
+   64  2  100000/100000  101531    20000/20000      101531  101531  100000
+  256  2       0/100000  448           0/20000         444  100393  100000
+ 1024  2       0/100000  127           0/20000         125  100097  100000
+ 4096  2       0/100000  40            0/20000          39  100025  100000
+ 1024  5       0/100000  110           0/20000         106  100091  100000
+
+Interpretation: Nothing here is a bug: the guarantee is what permits it. At
+  width 64 / depth 2 eps*N = 3125.0 events is the allowed over-estimate, and
+  the measured worst single-event key reports 101531 - 32.49x that budget -
+  while 100000 of the 100000 keys that really appeared once report >= 1000.
+  The same threshold is cleared by 20000 of the 20000 keys that never appeared
+  at all, whose worst report is 101531, or 101.5% of the heavy hitter's true
+  count of 100000. Widening from 64 to 4096 at depth 2 moves single-key
+  offenders from 100000 to 0 and never-seen offenders from 20000 to 0;
+  deepening from 2 to 5 rows at width 1024 moves single-key offenders from 0
+  to 0. The heavy hitter is reported as 100091 against a true 100000, so
+  accuracy at the top buys nothing at the bottom.
+
+Interpretation: A deliberate full collision is what the worst case is: a probe
+  matches the heavy hitter in all 2 rows with probability about 2.441e-04 per
+  try, so sweeping 20000 probes expects 4.88 such keys and the observed
+  maximum unseen estimate of 101531 is that collision. With 5 rows at width
+  1024 the same sweep finds 0 offenders and a maximum of 106, because the
+  coincidence probability is now roughly 8.882e-16 and the sweep is far short
+  of it.
+==============================================================================
+5. update cost per event (timing)
+==============================================================================
+Batch of 20000 events replayed 7 times per operation: 2 warm-ups discarded,
+best of 5 kept; gc disabled while sampling.
+
+operation            best_ns  median_ns  spread_ns  spread_%  vs_dict
+---------------------------------------------------------------------
+dict increment           191        199         20      10.2    1.00x
+cms add 1024x5          5451       5496        447       8.1   28.57x
+cms add 8192x5          5025       5050        459       9.1   26.34x
+space-saver cap1024      792        808         27       3.4    4.15x
+cms+heap 1024x5+512    11983      12458        984       7.9   62.80x
+cms query 1024x5        4612       4743        259       5.5   24.17x
+
+Interpretation: The noise floor is each operation's own pass-to-pass spread
+  over the 5 scored passes: the widest on the board is cms+heap 1024x5+512 at
+  984 ns/event and the tightest is dict increment at 20 ns. A pair is a tie
+  when the two best readings sit within the wider of their own spreads.
+  Against the dict increment at 191 ns, cms add costs 28.57x at width 1024
+  (5451 ns) and 26.34x at width 8192 (5025 ns); those two widths differ by
+  -426 ns, -61 ns per extra 1024 columns, on a 459 ns pair floor - so marginal
+  width is inside the floor, and the multiply-shift path has the same depth in
+  both: depth - five hashes and five cell writes - is what the sketch pays
+  for, not width. Space-saver is 4.15x the dict at 792 ns, a 601 ns gap on a
+  27 ns pair floor, so that one is outside the floor, while cms query reads
+  4612 ns against the same add at 5451 ns (0.85x) on a 447 ns floor - outside.
+  The candidate heap, not the sketch, is the expensive part of the streaming
+  update: cms+heap runs 62.80x the dict at 11983 ns.
+
+Interpretation: The noisiest operation is dict increment at 10.2% spread (20
+  ns of 199 ns median); readings inside that band for the same operation
+  across the 5 scored passes mean the machine was loaded, which is why only
+  the ratios above are claimed and no ordering inside a pair's own spread is.
+  Extrapolating the best cms-add rate to the 50-million-event pipeline in the
+  problem statement takes 272.6 s of pure Python for the sketch alone, 28.6x
+  the dict's 9.5 s.
+==============================================================================
+6. deletion: removing an event vs subtracting an estimate (deterministic)
+==============================================================================
+The 30 highest-count keys are deleted outright: 130309 events taken out of
+200000, leaving 1470 keys with a non-zero true count. Scored population: all
+1500 keys for the cms, the 64 keys a space-saver of capacity 64 monitors.
+
+structure+op           under  min_gap      mae  ghosts  top10
+-------------------------------------------------------------
+cms event-remove           0        0     4.14       6  10/10
+cms subtract-estimate     22      -61     4.26       0  10/10
+cms clamped-remove         0        0     4.14       6  10/10
+ss event-remove            0        0  1315.71      12  2/10
+ss subtract-estimate       0        0  1569.25       0  2/10
+ss drop-key                0        0  1569.25       0  2/10
+
+Interpretation: Removing an event is the inverse of adding one and the run
+  agrees: cms event-remove under-estimates 0 of 1500 keys (min gap 0), the
+  insert-only answer, because it decrements exactly the 5 cells it incremented
+  and nothing else. Subtracting the *reported* estimate under-estimates 22
+  keys and moves the mean absolute error from 4.14 to 4.26 events: a report
+  already carries other keys' collisions, so the surplus comes off innocent
+  keys in those same 5 cells. The sign hides that - 0 reports went negative,
+  and the subtracted min is a lower bound of every cell the victim touches, so
+  negativity needs an over-subtraction the code does not do by default.
+  Clamping at zero instead of going negative gives 0 under-estimates. Ghosts
+  are the honest residue: the correct scheme still reports 6 of the 30 deleted
+  keys as present, because what is left in the cell is somebody else's count.
+
+Interpretation: Space-saver cannot offer the same op: event-remove leaves 0 of
+  its 64 monitored keys under-estimated (0 negative, min gap 0) and still
+  holds 12 of the 30 deleted keys, since an unmonitored key has nothing to
+  decrement and a monitored one keeps the count inherited from whoever it
+  replaced. drop-key evicts 0 of them and lands on a top-10 of 2/10 against
+  the post-deletion truth, versus 10/10 for cms event-remove and 10/10 for cms
+  subtract-estimate; subtract-estimate on space-saver gives 0 under-estimates
+  and 0 ghosts. Counting under-estimates plus ghosts for the honest deletion
+  op: 12 for space-saver against 6 for the cms, so on this stream space-saver
+  is the one that loses - the structure folklore prefers for heavy-hitter
+  accuracy is the one whose answer goes stale when the stream is edited.
